@@ -347,6 +347,14 @@ def dashboard_n1(engine):
             key="nome_upload_n1"
         )
         
+        # Seletor de país MANUAL
+        pais_manual = st.selectbox(
+            "País dos dados:", 
+            ["Automático", "Italia", "Espanha", "Polonia", "Romania"],
+            help="Selecione o país ou deixe 'Automático' para detecção automática",
+            key="pais_manual_n1"
+        )
+        
         uploaded_file = st.file_uploader(
             "Selecione o arquivo Excel da N1", 
             type=['xlsx', 'xls'],
@@ -357,7 +365,10 @@ def dashboard_n1(engine):
         if uploaded_file is not None and nome_personalizado.strip():
             try:
                 df_raw = pd.read_excel(uploaded_file)
-                df_processed = processar_dados_n1(df_raw)
+                
+                # Passar país manual para processamento
+                pais_para_processar = pais_manual if pais_manual != 'Automático' else None
+                df_processed = processar_dados_n1(df_raw, pais_para_processar)
                 
                 st.success(f"✅ Arquivo processado: {len(df_processed)} registros")
                 
@@ -367,7 +378,11 @@ def dashboard_n1(engine):
                     # Estatísticas de processamento
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.info(f"🌍 Países: {', '.join(df_processed['pais'].unique())}")
+                        pais_detectado = df_processed['pais'].unique()
+                        if pais_manual != 'Automático':
+                            st.info(f"🌍 País: {pais_manual} (selecionado manualmente)")
+                        else:
+                            st.info(f"🌍 Países detectados: {', '.join(pais_detectado)}")
                         
                         # Contar datas válidas
                         if 'completed_date' in df_processed.columns:
@@ -385,8 +400,11 @@ def dashboard_n1(engine):
                             produtos_unicos = df_processed['product_name'].nunique()
                             st.info(f"🏷️ Produtos únicos: {produtos_unicos}")
                     
-                    # Informação sobre identificação de países
-                    st.caption("🔍 **Identificação automática:** Itália (códigos província 2 letras), Espanha (CEP 01000-52999), Romênia (CEP 6 dígitos), Polônia (CEP específicos)")
+                    # Informação sobre identificação
+                    if pais_manual == 'Automático':
+                        st.caption("🔍 **Detecção automática ativa** - Se não funcionar corretamente, selecione o país manualmente")
+                    else:
+                        st.caption(f"✅ **País fixo:** Todos os registros serão marcados como {pais_manual}")
                 
                 if st.button("💾 Salvar no Banco de Dados", use_container_width=True, key="save_n1"):
                     try:
@@ -409,8 +427,10 @@ def dashboard_n1(engine):
                 st.info("""
                 **💡 Verifique se o arquivo contém:**
                 - Colunas esperadas (Order #, Product name, Order status, etc.)
-                - Pedidos com números começando com #
+                - Números de pedidos válidos (qualquer formato: #ITA123, LL15278, etc.)
                 - Dados válidos nas linhas
+                
+                **🇪🇸 Para arquivos da Espanha:** Selecione "Espanha" no seletor de país acima
                 """)
                 
                 # Debug: mostrar colunas encontradas
@@ -421,6 +441,11 @@ def dashboard_n1(engine):
                             st.write(list(df_raw.columns))
                             st.write("**Primeiras 3 linhas:**")
                             st.dataframe(df_raw.head(3))
+                            
+                            # Mostrar amostras de pedidos
+                            if 'Order #' in df_raw.columns:
+                                pedidos_amostra = df_raw['Order #'].head(5).tolist()
+                                st.write("**Amostras de números de pedidos:**", pedidos_amostra)
                 except:
                     pass
             except Exception as e:
