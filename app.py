@@ -50,7 +50,7 @@ def criar_tabelas(engine):
                 upload_id INTEGER REFERENCES uploads_n1(id) ON DELETE CASCADE,
                 order_number VARCHAR(50),
                 shipping_number VARCHAR(100),
-                completed_date TIMESTAMP,
+                completed_date TIMESTAMP NULL,
                 customer VARCHAR(255),
                 payment VARCHAR(50),
                 sku VARCHAR(100),
@@ -60,7 +60,7 @@ def criar_tabelas(engine):
                 product_cost DECIMAL(10,2),
                 order_status VARCHAR(50),
                 last_tracking VARCHAR(255),
-                last_tracking_date DATE,
+                last_tracking_date DATE NULL,
                 platform VARCHAR(50),
                 zip_code VARCHAR(20),
                 province_code VARCHAR(10),
@@ -119,11 +119,17 @@ def processar_dados_n1(df):
     # Processar datas
     if 'completed_date' in df_processed.columns:
         df_processed['completed_date'] = pd.to_datetime(df_processed['completed_date'], format='%d/%m/%Y %H:%M', errors='coerce')
-        df_processed['completed_date'] = df_processed['completed_date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        # Converter para string, mas manter None para valores inválidos
+        df_processed['completed_date'] = df_processed['completed_date'].apply(
+            lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notna(x) else None
+        )
     
     if 'last_tracking_date' in df_processed.columns:
         df_processed['last_tracking_date'] = pd.to_datetime(df_processed['last_tracking_date'], format='%d/%m/%Y', errors='coerce')
-        df_processed['last_tracking_date'] = df_processed['last_tracking_date'].dt.strftime('%Y-%m-%d')
+        # Converter para string, mas manter None para valores inválidos  
+        df_processed['last_tracking_date'] = df_processed['last_tracking_date'].apply(
+            lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else None
+        )
     
     # Processar tipos numéricos
     numeric_columns = ['total_revenues', 'quantity', 'product_cost']
@@ -131,13 +137,19 @@ def processar_dados_n1(df):
         if col in df_processed.columns:
             df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce')
     
-    # Processar strings
-    string_columns = ['zip_code', 'province_code']
+    # Processar strings (não datas)
+    string_columns = ['zip_code', 'province_code', 'customer', 'payment', 'sku', 'last_tracking', 'platform']
     for col in string_columns:
         if col in df_processed.columns:
             df_processed[col] = df_processed[col].astype(str).replace('nan', '')
     
-    df_processed = df_processed.fillna('')
+    # Preencher apenas campos de texto com strings vazias, manter datas e números como None/NaN
+    text_columns = ['order_number', 'shipping_number', 'customer', 'payment', 'sku', 
+                    'product_name', 'last_tracking', 'platform', 'zip_code', 'province_code', 'pais']
+    
+    for col in text_columns:
+        if col in df_processed.columns:
+            df_processed[col] = df_processed[col].fillna('')
     
     # Identificar país
     def identificar_pais(row):
@@ -167,11 +179,14 @@ def salvar_dados_n1(df, nome_personalizado, engine):
             periodo_fim = None
             
             if 'completed_date' in df.columns:
-                dates_series = pd.to_datetime(df['completed_date'], errors='coerce')
-                dates_series = dates_series.dropna()
-                if not dates_series.empty:
-                    periodo_inicio = dates_series.min().date()
-                    periodo_fim = dates_series.max().date()
+                # Filtrar apenas datas válidas (não None)
+                datas_validas = df[df['completed_date'].notna()]['completed_date']
+                if not datas_validas.empty:
+                    dates_series = pd.to_datetime(datas_validas, errors='coerce')
+                    dates_series = dates_series.dropna()
+                    if not dates_series.empty:
+                        periodo_inicio = dates_series.min().date()
+                        periodo_fim = dates_series.max().date()
             
             # Salvar upload
             upload_data = {
@@ -193,7 +208,20 @@ def salvar_dados_n1(df, nome_personalizado, engine):
             df_copy = df.copy()
             df_copy['upload_id'] = upload_id
             
-            df_copy.to_sql('dados_n1', conn, if_exists='append', index=False)
+            # Para arquivos grandes, usar chunks menores
+            chunk_size = 100 if len(df_copy) > 500 else 500
+            
+            # Inserir em chunks para evitar timeout e problemas de memória
+            total_chunks = (len(df_copy) // chunk_size) + (1 if len(df_copy) % chunk_size > 0 else 0)
+            
+            for i in range(0, len(df_copy), chunk_size):
+                chunk = df_copy.iloc[i:i + chunk_size]
+                chunk.to_sql('dados_n1', conn, if_exists='append', index=False)
+                
+                # Mostrar progresso para arquivos grandes
+                if total_chunks > 1:
+                    chunk_num = (i // chunk_size) + 1
+                    print(f"Processando chunk {chunk_num}/{total_chunks} ({len(chunk)} registros)")
             
             return upload_id
             
@@ -332,18 +360,46 @@ def dashboard_n1(engine):
                 
                 with st.expander("👁️ Preview dos dados"):
                     st.dataframe(df_processed.head(3))
-                    st.info(f"Países: {', '.join(df_processed['pais'].unique())}")
+                    
+                    # Estatísticas de processamento
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.info(f"🌍 Países: {', '.join(df_processed['pais'].unique())}")
+                        
+                        # Contar datas válidas
+                        if 'completed_date' in df_processed.columns:
+                            datas_validas = df_processed['completed_date'].notna().sum()
+                            st.info(f"📅 Datas válidas: {datas_validas}/{len(df_processed)}")
+                    
+                    with col2:
+                        # Status dos pedidos
+                        if 'order_status' in df_processed.columns:
+                            status_counts = df_processed['order_status'].value_counts()
+                            st.info(f"📊 Status mais comum: {status_counts.index[0]} ({status_counts.iloc[0]})")
+                            
+                        # Produtos únicos
+                        if 'product_name' in df_processed.columns:
+                            produtos_unicos = df_processed['product_name'].nunique()
+                            st.info(f"🏷️ Produtos únicos: {produtos_unicos}")
+                    
+                    # Informação sobre identificação de países
+                    st.caption("🔍 **Identificação automática:** Itália (códigos província 2 letras), Espanha (CEP 01000-52999), Romênia (CEP 6 dígitos), Polônia (CEP específicos)")
                 
                 if st.button("💾 Salvar no Banco de Dados", use_container_width=True, key="save_n1"):
                     try:
-                        with st.spinner("Salvando dados..."):
+                        # Mostrar alerta para arquivos grandes
+                        if len(df_processed) > 500:
+                            st.info(f"📊 Arquivo grande detectado ({len(df_processed)} registros). O processamento pode levar alguns minutos...")
+                        
+                        with st.spinner("Salvando dados no banco..."):
                             upload_id = salvar_dados_n1(df_processed, nome_personalizado.strip(), engine)
-                            st.success(f"✅ Dados salvos com sucesso!")
+                            st.success(f"✅ Dados salvos com sucesso! ({len(df_processed)} registros)")
                             st.session_state.upload_success_n1 = True
                             st.cache_data.clear()
                             st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Erro: {str(e)}")
+                        st.error(f"❌ Erro ao salvar: {str(e)}")
+                        st.info("💡 Para arquivos muito grandes, tente dividir em arquivos menores.")
                         
             except Exception as e:
                 st.error(f"❌ Erro ao processar arquivo: {str(e)}")
@@ -390,7 +446,7 @@ def dashboard_n1(engine):
     # Seletor de País
     pais_selecionado = st.selectbox(
         "Selecione o país:", 
-        ["Todos", "Italia", "Polonia", "Romania"],
+        ["Todos", "Italia", "Espanha", "Polonia", "Romania"],
         help="Filtra os períodos disponíveis pelo país selecionado",
         key="pais_n1"
     )
