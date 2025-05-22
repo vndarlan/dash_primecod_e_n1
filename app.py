@@ -291,6 +291,9 @@ def calcular_metricas_n1(df):
 def excluir_upload_n1(upload_id, engine):
     """Exclui upload N1 e seus dados"""
     try:
+        # Converter para int para evitar erro numpy.int64
+        upload_id = int(upload_id)
+        
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM uploads_n1 WHERE id = :upload_id"), {'upload_id': upload_id})
         return True
@@ -401,8 +404,38 @@ def dashboard_n1(engine):
                         st.error(f"❌ Erro ao salvar: {str(e)}")
                         st.info("💡 Para arquivos muito grandes, tente dividir em arquivos menores.")
                         
+            except ValueError as ve:
+                st.error(f"❌ Erro na estrutura do arquivo: {str(ve)}")
+                st.info("""
+                **💡 Verifique se o arquivo contém:**
+                - Colunas esperadas (Order #, Product name, Order status, etc.)
+                - Pedidos com números começando com #
+                - Dados válidos nas linhas
+                """)
+                
+                # Debug: mostrar colunas encontradas
+                try:
+                    if 'df_raw' in locals():
+                        with st.expander("🔍 Debug - Colunas encontradas no arquivo"):
+                            st.write("**Colunas disponíveis:**")
+                            st.write(list(df_raw.columns))
+                            st.write("**Primeiras 3 linhas:**")
+                            st.dataframe(df_raw.head(3))
+                except:
+                    pass
             except Exception as e:
                 st.error(f"❌ Erro ao processar arquivo: {str(e)}")
+                st.info("💡 Certifique-se de que o arquivo é um Excel válido (.xlsx ou .xls)")
+                
+                # Debug: informações do arquivo
+                try:
+                    if 'df_raw' in locals():
+                        with st.expander("🔍 Debug - Informações do arquivo"):
+                            st.write(f"**Formato:** {uploaded_file.type}")
+                            st.write(f"**Tamanho:** {len(df_raw)} linhas x {len(df_raw.columns)} colunas")
+                            st.write("**Colunas:**", list(df_raw.columns))
+                except:
+                    st.write(f"**Tipo do arquivo:** {uploaded_file.type if uploaded_file else 'Desconhecido'}")
         
         elif uploaded_file is not None and not nome_personalizado.strip():
             st.warning("⚠️ Digite um nome para o upload")
@@ -420,7 +453,7 @@ def dashboard_n1(engine):
             )
             
             if st.button("🗑️ Excluir Dados", type="secondary", use_container_width=True, key="delete_n1"):
-                upload_id = uploads.iloc[upload_para_excluir]['id']
+                upload_id = int(uploads.iloc[upload_para_excluir]['id'])  # Converter para int
                 nome = uploads.iloc[upload_para_excluir]['nome_arquivo']
                 
                 if st.session_state.get('confirm_delete_n1') != upload_id:
@@ -430,6 +463,7 @@ def dashboard_n1(engine):
                     if excluir_upload_n1(upload_id, engine):
                         st.success(f"✅ '{nome}' foi excluído com sucesso!")
                         st.session_state.confirm_delete_n1 = None
+                        st.cache_data.clear()  # Limpar cache após exclusão
                         st.rerun()
         else:
             st.info("Nenhum upload N1 encontrado")
