@@ -368,7 +368,7 @@ def dashboard_n1(engine):
                 
                 # Passar país manual para processamento
                 pais_para_processar = pais_manual if pais_manual != 'Automático' else None
-                df_processed = processar_dados_n1(df_raw, pais_para_processar)
+                df_processed = processar_dados_n1_v2(df_raw, pais_para_processar)
                 
                 st.success(f"✅ Arquivo processado: {len(df_processed)} registros")
                 
