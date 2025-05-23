@@ -3,6 +3,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from datetime import datetime
 import os
+import re
 
 # Configuração da página
 st.set_page_config(
@@ -70,105 +71,223 @@ def criar_tabelas(engine):
         
         conn.commit()
 
+def detectar_pais_por_pedido(order_number):
+    """Detecta país baseado no formato do número do pedido"""
+    if not order_number or pd.isna(order_number):
+        return None
+    
+    order_str = str(order_number).strip().upper()
+    
+    # Padrões de pedidos por país
+    if order_str.startswith('#ITA'):
+        return 'Italia'
+    elif order_str.startswith('LL'):
+        return 'Espanha'
+    elif order_str.startswith('#ESP') or order_str.startswith('#ES'):
+        return 'Espanha'
+    elif order_str.startswith('#POL') or order_str.startswith('#PL'):
+        return 'Polonia'
+    elif order_str.startswith('#ROM') or order_str.startswith('#RO'):
+        return 'Romania'
+    
+    return None
+
+def is_valid_order_number(order_number):
+    """Verifica se o número do pedido é válido"""
+    if not order_number or pd.isna(order_number):
+        return False
+    
+    order_str = str(order_number).strip()
+    
+    # Deve ter pelo menos 3 caracteres
+    if len(order_str) < 3:
+        return False
+    
+    # Deve conter pelo menos uma letra e um número
+    has_letter = bool(re.search(r'[a-zA-Z]', order_str))
+    has_number = bool(re.search(r'\d', order_str))
+    
+    if not (has_letter and has_number):
+        return False
+    
+    # Padrões válidos conhecidos
+    valid_patterns = [
+        r'^#[A-Z]{2,3}\d+',  # #ITA123, #ESP123, #POL123
+        r'^LL\d+',           # LL15278 (Espanha)
+        r'^[A-Z]{2}\d+',     # Outros códigos de país
+        r'^\d+[A-Z]+',       # Números seguidos de letras
+    ]
+    
+    for pattern in valid_patterns:
+        if re.match(pattern, order_str):
+            return True
+    
+    # Se não matchou padrões específicos, aceitar se tem formato alfanumérico básico
+    # e não é obviamente inválido
+    if re.match(r'^[A-Za-z0-9#\-_]+$', order_str) and len(order_str) >= 3:
+        return True
+    
+    return False
+
 def processar_dados_n1(df, pais_manual=None):
     """Processa dados do Excel da N1"""
-    df_clean = df.copy()
-    
-    # Remover primeira linha se for header duplicado
-    if len(df_clean) > 0 and not str(df_clean.iloc[0, 0]).startswith('#'):
-        df_clean = df_clean.iloc[1:].reset_index(drop=True)
-    
-    # Remover última linha se contiver "Total"
-    if len(df_clean) > 1:
-        last_row = df_clean.iloc[-1]
-        last_row_str = ' '.join([str(val) for val in last_row if pd.notna(val)]).lower()
-        if 'total' in last_row_str:
-            df_clean = df_clean.iloc[:-1].reset_index(drop=True)
-    
-    # Mapeamento das colunas
-    column_mapping = {
-        'Order #': 'order_number',
-        'Shipping #': 'shipping_number', 
-        'Completed date': 'completed_date',
-        'Customer': 'customer',
-        'Payment': 'payment',
-        'Sku': 'sku',
-        'Product name': 'product_name',
-        'Total revenues': 'total_revenues',
-        'Quantity': 'quantity',
-        'Product cost': 'product_cost',
-        'Order status': 'order_status',
-        'Last tracking': 'last_tracking',
-        'Last tracking date': 'last_tracking_date',
-        'Platform': 'platform',
-        'Zip': 'zip_code',
-        'Province code': 'province_code'
-    }
-    
-    # Filtrar colunas existentes
-    available_columns = {k: v for k, v in column_mapping.items() if k in df_clean.columns}
-    df_processed = df_clean[list(available_columns.keys())].copy()
-    df_processed = df_processed.rename(columns=available_columns)
-    
-    # Limpar dados inválidos
-    if 'order_number' in df_processed.columns:
-        df_processed = df_processed[df_processed['order_number'].notna()]
-        df_processed = df_processed[df_processed['order_number'] != '']
-        df_processed = df_processed[df_processed['order_number'].astype(str).str.startswith('#')]
-    
-    # Processar datas
-    if 'completed_date' in df_processed.columns:
-        df_processed['completed_date'] = pd.to_datetime(df_processed['completed_date'], format='%d/%m/%Y %H:%M', errors='coerce')
-        # Converter para string, mas manter None para valores inválidos
-        df_processed['completed_date'] = df_processed['completed_date'].apply(
-            lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notna(x) else None
-        )
-    
-    if 'last_tracking_date' in df_processed.columns:
-        df_processed['last_tracking_date'] = pd.to_datetime(df_processed['last_tracking_date'], format='%d/%m/%Y', errors='coerce')
-        # Converter para string, mas manter None para valores inválidos  
-        df_processed['last_tracking_date'] = df_processed['last_tracking_date'].apply(
-            lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else None
-        )
-    
-    # Processar tipos numéricos
-    numeric_columns = ['total_revenues', 'quantity', 'product_cost']
-    for col in numeric_columns:
-        if col in df_processed.columns:
-            df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce')
-    
-    # Processar strings (não datas)
-    string_columns = ['zip_code', 'province_code', 'customer', 'payment', 'sku', 'last_tracking', 'platform']
-    for col in string_columns:
-        if col in df_processed.columns:
-            df_processed[col] = df_processed[col].astype(str).replace('nan', '')
-    
-    # Preencher apenas campos de texto com strings vazias, manter datas e números como None/NaN
-    text_columns = ['order_number', 'shipping_number', 'customer', 'payment', 'sku', 
-                    'product_name', 'last_tracking', 'platform', 'zip_code', 'province_code', 'pais']
-    
-    for col in text_columns:
-        if col in df_processed.columns:
-            df_processed[col] = df_processed[col].fillna('')
-    
-    # Identificar país
-    def identificar_pais(row):
-        province_code = str(row.get('province_code', '')).upper().strip()
-        zip_code = str(row.get('zip_code', '')).strip()
+    try:
+        df_clean = df.copy()
         
-        if len(province_code) == 2 and province_code.isalpha() and province_code != '':
+        # Log inicial
+        print(f"DataFrame inicial: {len(df_clean)} linhas x {len(df_clean.columns)} colunas")
+        
+        # Remover primeira linha se for header duplicado
+        if len(df_clean) > 0 and not str(df_clean.iloc[0, 0]).startswith(('#', 'LL')):
+            primeira_linha = str(df_clean.iloc[0, 0]).strip()
+            if primeira_linha.lower() in ['order #', 'order', 'número pedido'] or primeira_linha == '':
+                df_clean = df_clean.iloc[1:].reset_index(drop=True)
+                print(f"Removida primeira linha (header duplicado). Agora: {len(df_clean)} linhas")
+        
+        # Remover última linha se contiver "Total"
+        if len(df_clean) > 1:
+            last_row = df_clean.iloc[-1]
+            last_row_str = ' '.join([str(val) for val in last_row if pd.notna(val)]).lower()
+            if 'total' in last_row_str:
+                df_clean = df_clean.iloc[:-1].reset_index(drop=True)
+                print(f"Removida última linha (total). Agora: {len(df_clean)} linhas")
+        
+        # Mapeamento das colunas
+        column_mapping = {
+            'Order #': 'order_number',
+            'Shipping #': 'shipping_number', 
+            'Completed date': 'completed_date',
+            'Customer': 'customer',
+            'Payment': 'payment',
+            'Sku': 'sku',
+            'Product name': 'product_name',
+            'Total revenues': 'total_revenues',
+            'Quantity': 'quantity',
+            'Product cost': 'product_cost',
+            'Order status': 'order_status',
+            'Last tracking': 'last_tracking',
+            'Last tracking date': 'last_tracking_date',
+            'Platform': 'platform',
+            'Zip': 'zip_code',
+            'Province code': 'province_code'
+        }
+        
+        # Filtrar colunas existentes
+        available_columns = {k: v for k, v in column_mapping.items() if k in df_clean.columns}
+        missing_columns = [k for k in column_mapping.keys() if k not in df_clean.columns]
+        
+        if missing_columns:
+            print(f"Colunas não encontradas: {missing_columns}")
+        
+        df_processed = df_clean[list(available_columns.keys())].copy()
+        df_processed = df_processed.rename(columns=available_columns)
+        
+        print(f"Após mapeamento de colunas: {len(df_processed)} linhas")
+        
+        # Limpar dados inválidos - VERSÃO CORRIGIDA
+        if 'order_number' in df_processed.columns:
+            # Remover valores nulos ou vazios
+            inicial_count = len(df_processed)
+            df_processed = df_processed[df_processed['order_number'].notna()]
+            df_processed = df_processed[df_processed['order_number'].astype(str).str.strip() != '']
+            
+            print(f"Após remover nulos/vazios: {len(df_processed)} linhas (removidos: {inicial_count - len(df_processed)})")
+            
+            # Usar nova função de validação mais flexível
+            valid_mask = df_processed['order_number'].apply(is_valid_order_number)
+            df_processed = df_processed[valid_mask]
+            
+            print(f"Após validação de pedidos: {len(df_processed)} linhas")
+            
+            # Mostrar exemplos de pedidos aceitos
+            if len(df_processed) > 0:
+                sample_orders = df_processed['order_number'].head(5).tolist()
+                print(f"Exemplos de pedidos aceitos: {sample_orders}")
+        
+        if len(df_processed) == 0:
+            raise ValueError("Nenhum pedido válido encontrado após filtros. Verifique o formato dos números de pedidos.")
+        
+        # Processar datas
+        if 'completed_date' in df_processed.columns:
+            df_processed['completed_date'] = pd.to_datetime(df_processed['completed_date'], format='%d/%m/%Y %H:%M', errors='coerce')
+            df_processed['completed_date'] = df_processed['completed_date'].apply(
+                lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notna(x) else None
+            )
+        
+        if 'last_tracking_date' in df_processed.columns:
+            df_processed['last_tracking_date'] = pd.to_datetime(df_processed['last_tracking_date'], format='%d/%m/%Y', errors='coerce')
+            df_processed['last_tracking_date'] = df_processed['last_tracking_date'].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else None
+            )
+        
+        # Processar tipos numéricos
+        numeric_columns = ['total_revenues', 'quantity', 'product_cost']
+        for col in numeric_columns:
+            if col in df_processed.columns:
+                df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce')
+        
+        # Processar strings (não datas)
+        string_columns = ['zip_code', 'province_code', 'customer', 'payment', 'sku', 'last_tracking', 'platform']
+        for col in string_columns:
+            if col in df_processed.columns:
+                df_processed[col] = df_processed[col].astype(str).replace('nan', '')
+        
+        # Preencher apenas campos de texto com strings vazias
+        text_columns = ['order_number', 'shipping_number', 'customer', 'payment', 'sku', 
+                        'product_name', 'last_tracking', 'platform', 'zip_code', 'province_code', 'pais']
+        
+        for col in text_columns:
+            if col in df_processed.columns:
+                df_processed[col] = df_processed[col].fillna('')
+        
+        # Identificar país - VERSÃO MELHORADA
+        def identificar_pais(row):
+            # Se país foi especificado manualmente, usar esse
+            if pais_manual:
+                return pais_manual
+            
+            # Tentar detectar pelo número do pedido
+            pais_pedido = detectar_pais_por_pedido(row.get('order_number'))
+            if pais_pedido:
+                return pais_pedido
+            
+            # Fallback: analisar código de província e CEP
+            province_code = str(row.get('province_code', '')).upper().strip()
+            zip_code = str(row.get('zip_code', '')).strip()
+            
+            # Códigos de província da Espanha (2 letras)
+            spain_provinces = ['A', 'AB', 'AL', 'AV', 'B', 'BA', 'BI', 'BU', 'C', 'CA', 'CC', 'CO', 'CR', 'CS', 'CU', 'GC', 'GI', 'GR', 'GU', 'H', 'HU', 'J', 'L', 'LE', 'LO', 'LU', 'M', 'MA', 'MU', 'NA', 'O', 'OR', 'P', 'PM', 'PO', 'S', 'SA', 'SE', 'SG', 'SO', 'SS', 'T', 'TE', 'TF', 'TO', 'V', 'VA', 'VI', 'Z', 'ZA']
+            
+            if province_code in spain_provinces:
+                return 'Espanha'
+            
+            # Códigos de província da Itália (2 letras)
+            if len(province_code) == 2 and province_code.isalpha() and province_code not in spain_provinces:
+                return 'Italia'
+            
+            # Análise por CEP
+            if zip_code and zip_code != '' and zip_code.isdigit():
+                if len(zip_code) == 5:
+                    # CEPs de 5 dígitos podem ser Itália ou Espanha
+                    # Vamos usar outros indicadores
+                    if province_code in spain_provinces:
+                        return 'Espanha'
+                    return 'Italia'
+                elif len(zip_code) == 6:
+                    return 'Romania'
+            
+            # Default: Italia (para compatibilidade)
             return 'Italia'
         
-        if zip_code and zip_code != '' and zip_code.isdigit():
-            if len(zip_code) == 5:
-                return 'Italia'
-            elif len(zip_code) == 6:
-                return 'Romania'
+        df_processed['pais'] = df_processed.apply(identificar_pais, axis=1)
         
-        return 'Italia'
-    
-    df_processed['pais'] = df_processed.apply(identificar_pais, axis=1)
-    return df_processed
+        print(f"Países detectados: {df_processed['pais'].value_counts().to_dict()}")
+        
+        return df_processed
+        
+    except Exception as e:
+        print(f"Erro em processar_dados_n1: {str(e)}")
+        raise e
 
 def salvar_dados_n1(df, nome_personalizado, engine):
     """Salva dados da N1 no banco"""
@@ -351,7 +470,7 @@ def dashboard_n1(engine):
         pais_manual = st.selectbox(
             "País dos dados:", 
             ["Automático", "Italia", "Espanha", "Polonia", "Romania"],
-            help="Selecione o país ou deixe 'Automático' para detecção automática",
+            help="Selecione o país ou deixe 'Automático' para detecção automática baseada no formato dos pedidos",
             key="pais_manual_n1"
         )
         
@@ -378,11 +497,12 @@ def dashboard_n1(engine):
                     # Estatísticas de processamento
                     col1, col2 = st.columns(2)
                     with col1:
-                        pais_detectado = df_processed['pais'].unique()
+                        pais_detectado = df_processed['pais'].value_counts()
                         if pais_manual != 'Automático':
                             st.info(f"🌍 País: {pais_manual} (selecionado manualmente)")
                         else:
-                            st.info(f"🌍 Países detectados: {', '.join(pais_detectado)}")
+                            paises_str = ', '.join([f"{pais} ({count})" for pais, count in pais_detectado.items()])
+                            st.info(f"🌍 Países detectados: {paises_str}")
                         
                         # Contar datas válidas
                         if 'completed_date' in df_processed.columns:
@@ -400,9 +520,13 @@ def dashboard_n1(engine):
                             produtos_unicos = df_processed['product_name'].nunique()
                             st.info(f"🏷️ Produtos únicos: {produtos_unicos}")
                     
+                    # Mostrar exemplos de pedidos detectados
+                    sample_orders = df_processed['order_number'].head(5).tolist()
+                    st.caption(f"📝 **Exemplos de pedidos:** {', '.join(sample_orders)}")
+                    
                     # Informação sobre identificação
                     if pais_manual == 'Automático':
-                        st.caption("🔍 **Detecção automática ativa** - Se não funcionar corretamente, selecione o país manualmente")
+                        st.caption("🔍 **Detecção automática ativa** - Agora suporta formatos #ITA, LL, e outros")
                     else:
                         st.caption(f"✅ **País fixo:** Todos os registros serão marcados como {pais_manual}")
                 
@@ -425,18 +549,22 @@ def dashboard_n1(engine):
             except ValueError as ve:
                 st.error(f"❌ Erro na estrutura do arquivo: {str(ve)}")
                 st.info("""
-                **💡 Verifique se o arquivo contém:**
-                - Colunas esperadas (Order #, Product name, Order status, etc.)
-                - Números de pedidos válidos (qualquer formato: #ITA123, LL15278, etc.)
-                - Dados válidos nas linhas
+                **💡 Formatos de pedidos suportados:**
+                - 🇮🇹 Itália: #ITA123, #ITA456
+                - 🇪🇸 Espanha: LL15278, LL15281
+                - 🇵🇱 Polônia: #POL123, #PL456  
+                - 🇷🇴 Romênia: #ROM123, #RO456
+                - 🌍 Outros formatos alfanuméricos válidos
                 
-                **🇪🇸 Para arquivos da Espanha:** Selecione "Espanha" no seletor de país acima
+                **🔧 Dicas:**
+                - Para forçar um país específico, selecione-o no dropdown acima
+                - Verifique se há números de pedidos válidos na coluna 'Order #'
                 """)
                 
                 # Debug: mostrar colunas encontradas
                 try:
                     if 'df_raw' in locals():
-                        with st.expander("🔍 Debug - Colunas encontradas no arquivo"):
+                        with st.expander("🔍 Debug - Análise do arquivo"):
                             st.write("**Colunas disponíveis:**")
                             st.write(list(df_raw.columns))
                             st.write("**Primeiras 3 linhas:**")
@@ -444,8 +572,12 @@ def dashboard_n1(engine):
                             
                             # Mostrar amostras de pedidos
                             if 'Order #' in df_raw.columns:
-                                pedidos_amostra = df_raw['Order #'].head(5).tolist()
-                                st.write("**Amostras de números de pedidos:**", pedidos_amostra)
+                                pedidos_amostra = df_raw['Order #'].dropna().head(10).tolist()
+                                st.write("**Amostras de números de pedidos encontrados:**")
+                                for i, pedido in enumerate(pedidos_amostra, 1):
+                                    valid = is_valid_order_number(pedido)
+                                    pais_det = detectar_pais_por_pedido(pedido)
+                                    st.write(f"{i}. `{pedido}` - {'✅ Válido' if valid else '❌ Inválido'} {f'({pais_det})' if pais_det else ''}")
                 except:
                     pass
             except Exception as e:
