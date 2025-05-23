@@ -70,7 +70,7 @@ def criar_tabelas(engine):
         
         conn.commit()
 
-def processar_dados_n1(df):
+def processar_dados_n1(df, pais_manual=None):
     """Processa dados do Excel da N1"""
     df_clean = df.copy()
     
